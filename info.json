@@ -1,0 +1,10 @@
+{
+  "participants": ["João Pedro Mattos"],
+  "social": [
+    "https://github.com/jotapemattos",
+    "https://www.linkedin.com/in/joao-pedro-mattos-rodrigues-camargo/"
+  ],
+  "source-code-repo": "https://github.com/jotapemattos/rinha-de-backend-2026",
+  "stack": ["Bun", "Typescript", "HAProxy"],
+  "open_to_work": true
+}
