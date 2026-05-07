@@ -27,5 +27,4 @@ jobs:
           platforms: linux/amd64
           push: true
           tags: jotapemattos/rinha-de-backend-2026:latest
-          cache-from: type=gha
-          cache-to: type=gha,mode=max
+          no-cache: true
