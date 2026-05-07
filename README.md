@@ -111,53 +111,16 @@ RESPONSES[b] = Buffer.from(`HTTP/1.1 200 OK\r\nContent-Type: ...`);
 
 ### Warmup
 
-50 iterações de warmup são executadas na inicialização para aquecer o JIT do JavaScriptCore (engine do Bun) antes de o HAProxy marcar o serviço como healthy.
+50 iterações de warmup são executadas na inicialização para aquecer o JIT do V8 antes de o HAProxy marcar o serviço como healthy.
 
 ## Build do modelo (`scripts/build-ivf-flat.ts`)
 
-Script offline que constrói o arquivo `resources/ivf-flat.bin` a partir de `resources/references.bin`. Precisa ser executado uma vez antes de subir o servidor.
+Script offline que constrói o arquivo `resources/ivf-flat.bin` a partir de `resources/references.bin`. 
 
 1. **k-means++** sobre 100k amostras → 2000 centroids (coarse quantizer)
 2. Atribuição de todos os N vetores ao centroid mais próximo
 3. **PQ training** (M=7 sub-quantizadores, K=256 codewords cada) sobre resíduos — usado apenas internamente para candidatos na etapa de avaliação; o runtime de inferência não usa PQ
 4. Reordenação por cluster + avaliação em 10k exemplos (acurácia, F1, FP, FN)
-5. Escrita do arquivo binário com layout fixo documentado no código
-
-**Layout do arquivo:**
-```
-[u32 ×7: NLIST, N, NPROBE, M, K_PQ, KNN, DIMS]
-[f32: coarse centroids — NLIST × DIMS]
-[f32: PQ codebooks — M × K_PQ × SUB]   ← lido pelo build; ignorado pelo runtime
-[u32: cluster sizes — NLIST]
-[u32: cluster offsets — NLIST]
-[u8:  PQ codes — N × M]                ← lido pelo build; ignorado pelo runtime
-[u8:  labels — N]
-[u8:  padding]
-[i16: vectors — N × DIMS]              ← usado pelo runtime (L2 exato)
-```
-
-## Regra de negócio
+5. Escrita do arquivo binário com layout fixo 
 
 ```
-approved = fraud_score < 0.6
-```
-
-O threshold 0.6 é fixo conforme as regras do desafio. Ajustes de precisão/recall devem ser feitos no modelo (features, tamanho do índice, nprobe), não no threshold.
-
-## Desenvolvimento local
-
-```bash
-# Instalar dependências
-bun install
-
-# Construir o índice IVF (necessário uma vez)
-bun scripts/build-ivf-flat.ts
-
-# Rodar localmente
-bun src/server.ts
-
-# Docker
-docker compose up
-```
-
-O health check espera que o socket Unix exista antes de o HAProxy iniciar o tráfego.
