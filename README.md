@@ -1,6 +1,6 @@
 # Rinha de Backend 2026 — Detecção de Fraude
 
-Solução para a Rinha de Backend 2026. O desafio consiste em classificar transações financeiras como fraude ou não-fraude com altíssima throughput e latência p99 < 1ms.
+Solução para a Rinha de Backend 2026. O desafio consiste em classificar transações financeiras como fraude ou não-fraude.
 
 ## Arquitetura geral
 
