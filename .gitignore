@@ -36,5 +36,9 @@ report.[0-9]_.[0-9]_.[0-9]_.[0-9]_.json
 # local docker overrides
 docker-compose.override.yml
 
-# AI
+# docs from rinha-de-backend-2026
 docs
+
+# generated at build time — not committed
+resources/references.bin
+resources/ivf-flat.bin
