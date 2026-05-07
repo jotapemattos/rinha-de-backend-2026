@@ -45,3 +45,8 @@ services:
 
 volumes:
   socks:
+    driver: local
+    driver_opts:
+      type: tmpfs
+      device: tmpfs
+      o: "mode=1777"
