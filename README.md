@@ -123,4 +123,3 @@ Script offline que constrói o arquivo `resources/ivf-flat.bin` a partir de `res
 4. Reordenação por cluster + avaliação em 10k exemplos (acurácia, F1, FP, FN)
 5. Escrita do arquivo binário com layout fixo 
 
-```
