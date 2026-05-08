@@ -1,13 +1,8 @@
 x-api: &api
   image: jotapemattos/rinha-de-backend-2026:latest
+  restart: always
   volumes:
     - socks:/socks
-  healthcheck:
-    test: ["CMD-SHELL", "test -S $$UDS_PATH"]
-    interval: 2s
-    timeout: 1s
-    retries: 10
-    start_period: 5s
   deploy:
     resources:
       limits:
@@ -27,16 +22,15 @@ services:
 
   haproxy:
     image: haproxy:alpine
+    restart: always
     volumes:
       - ./haproxy.cfg:/usr/local/etc/haproxy/haproxy.cfg:ro
       - socks:/socks
     ports:
       - "9999:9999"
     depends_on:
-      api1:
-        condition: service_healthy
-      api2:
-        condition: service_healthy
+      - api1
+      - api2
     deploy:
       resources:
         limits:
@@ -49,4 +43,4 @@ volumes:
     driver_opts:
       type: tmpfs
       device: tmpfs
-      o: "mode=1777"
+      o: "size=4m,mode=0777"
