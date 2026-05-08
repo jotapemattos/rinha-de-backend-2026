@@ -3,12 +3,6 @@ x-api: &api
   restart: always
   volumes:
     - socks:/socks
-  healthcheck:
-    test: ["CMD-SHELL", "test -S $$UDS_PATH"]
-    interval: 2s
-    timeout: 1s
-    retries: 15
-    start_period: 5s
   deploy:
     resources:
       limits:
@@ -20,11 +14,23 @@ services:
     <<: *api
     environment:
       UDS_PATH: /socks/api1.sock
+    healthcheck:
+      test: ["CMD-SHELL", "test -S /socks/api1.sock"]
+      interval: 2s
+      timeout: 1s
+      retries: 15
+      start_period: 5s
 
   api2:
     <<: *api
     environment:
       UDS_PATH: /socks/api2.sock
+    healthcheck:
+      test: ["CMD-SHELL", "test -S /socks/api2.sock"]
+      interval: 2s
+      timeout: 1s
+      retries: 15
+      start_period: 5s
 
   haproxy:
     image: haproxy:alpine
