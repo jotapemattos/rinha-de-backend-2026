@@ -289,7 +289,7 @@ export function ivfFlatScore(vec: Float32Array): number {
     _qS[d] = Math.round(x * 32767);
   }
 
-  findTopCentroids(FAST_NPROBE);
+  findTopCentroids(FULL_NPROBE);
 
   _hSize = 0;
   scanClusters(0, FAST_NPROBE);
@@ -300,7 +300,6 @@ export function ivfFlatScore(vec: Float32Array): number {
     return decideFromHeap(fraudCount);
   }
 
-  findTopCentroids(FULL_NPROBE);
   scanClusters(FAST_NPROBE, FULL_NPROBE);
 
   fraudCount = fraudCountFromHeap();
