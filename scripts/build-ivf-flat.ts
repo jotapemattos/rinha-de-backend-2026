@@ -258,15 +258,26 @@ const clusterOffsets = new Uint32Array(NLIST);
 for (let c = 1; c < NLIST; c++)
   clusterOffsets[c] = clusterOffsets[c - 1]! + clusterSizes[c - 1]!;
 
-const writePos = clusterOffsets.slice();
+// Count fraud per cluster to segregate: fraud vectors first, legit second.
+const clusterFraudCounts = new Uint32Array(NLIST);
+for (let i = 0; i < N; i++) {
+  if (labels[i]) clusterFraudCounts[assignments[i]!]!++;
+}
+
+const fraudWritePos = clusterOffsets.slice();
+const legitWritePos = new Uint32Array(NLIST);
+for (let c = 0; c < NLIST; c++)
+  legitWritePos[c] = clusterOffsets[c]! + clusterFraudCounts[c]!;
+
 const sortedCodes = new Uint8Array(N * M);
 const sortedLabels = new Uint8Array(N);
 const sortedVecs = new Int16Array(N * DIMS);
 
 for (let i = 0; i < N; i++) {
   const c = assignments[i]!;
-  const pos = writePos[c]!++;
-  sortedLabels[pos] = labels[i]!;
+  const isFraud = labels[i]!;
+  const pos = isFraud ? fraudWritePos[c]!++ : legitWritePos[c]!++;
+  sortedLabels[pos] = isFraud;
   const srcBase = i * M,
     dstBase = pos * M;
   for (let m = 0; m < M; m++) sortedCodes[dstBase + m] = pqCodes[srcBase + m]!;
@@ -275,6 +286,25 @@ for (let i = 0; i < N; i++) {
   for (let d = 0; d < DIMS; d++) {
     const x = Math.max(-1, Math.min(1, vecsF32[vSrc + d]!));
     sortedVecs[vDst + d] = Math.round(x * 32767);
+  }
+}
+
+// Per-cluster bounding boxes in i16 space for coarse distance pruning.
+const bboxMin = new Int16Array(NLIST * DIMS);
+const bboxMax = new Int16Array(NLIST * DIMS);
+bboxMin.fill(32767);
+bboxMax.fill(-32768);
+for (let c = 0; c < NLIST; c++) {
+  const cOff = clusterOffsets[c]!;
+  const cEnd = cOff + clusterSizes[c]!;
+  const bOff = c * DIMS;
+  for (let row = cOff; row < cEnd; row++) {
+    const vBase = row * DIMS;
+    for (let d = 0; d < DIMS; d++) {
+      const v = sortedVecs[vBase + d]!;
+      if (v < bboxMin[bOff + d]!) bboxMin[bOff + d] = v;
+      if (v > bboxMax[bOff + d]!) bboxMax[bOff + d] = v;
+    }
   }
 }
 
@@ -428,6 +458,9 @@ console.log(
 //   [f32 pqCodebooks: M × K_PQ × SUB]
 //   [u32 clusterSizes: NLIST]
 //   [u32 clusterOffsets: NLIST]
+//   [u32 clusterFraudCounts: NLIST]
+//   [i16 bboxMin: NLIST × DIMS]
+//   [i16 bboxMax: NLIST × DIMS]
 //   [u8  sortedCodes: N × M]
 //   [u8  sortedLabels: N]
 //   [u8  padding: N % 2]
@@ -438,11 +471,13 @@ const ctrdB = NLIST * DIMS * 4;
 const cbB = M * K_PQ * SUB * 4;
 const szB = NLIST * 4;
 const offB = NLIST * 4;
+const fraudCntB = NLIST * 4;
+const bboxB = NLIST * DIMS * 2 * 2;
 const codesB = N * M;
 const labB = N;
 const padB = N & 1;
 const vecsB = N * DIMS * 2;
-const total = hdrB + ctrdB + cbB + szB + offB + codesB + labB + padB + vecsB;
+const total = hdrB + ctrdB + cbB + szB + offB + fraudCntB + bboxB + codesB + labB + padB + vecsB;
 
 console.log(`\nOutput: ${(total / 1024 / 1024).toFixed(1)} MB`);
 
@@ -473,6 +508,12 @@ new Uint32Array(out, byteOff, NLIST).set(clusterSizes);
 byteOff += szB;
 new Uint32Array(out, byteOff, NLIST).set(clusterOffsets);
 byteOff += offB;
+new Uint32Array(out, byteOff, NLIST).set(clusterFraudCounts);
+byteOff += fraudCntB;
+new Int16Array(out, byteOff, NLIST * DIMS).set(bboxMin);
+byteOff += NLIST * DIMS * 2;
+new Int16Array(out, byteOff, NLIST * DIMS).set(bboxMax);
+byteOff += NLIST * DIMS * 2;
 new Uint8Array(out, byteOff, N * M).set(sortedCodes);
 byteOff += codesB;
 new Uint8Array(out, byteOff, N).set(sortedLabels);
