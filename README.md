@@ -79,11 +79,13 @@ Classificador kNN aproximado (k=5) sobre o arquivo de referências pré-indexado
 - 2000 centroids treinados por k-means++ sobre amostra de 100k vetores
 - Vetores de referência armazenados como `Int16Array` (quantização escalar ×32767) organizados por cluster
 
-**Inferência em dois estágios:**
+**Inferência em dois estágios (single centroid search):**
 
-1. **Fast path** (`FAST_NPROBE = 5`): encontra os 5 centroids mais próximos com insertion sort e vasculha esses clusters com L2 exato. Early termination: se a distância parcial (após 4 ou 8 dimensões) já supera o pior dos top-5 atuais, o candidato é descartado sem calcular o restante.
+Uma única chamada `findTopCentroids(FULL_NPROBE = 32)` vasculha todos os 2000 centroids com um **max-heap de tamanho 32** — O(NLIST × log NPROBE) vs. O(NLIST × NPROBE) de insertion sort. Os resultados ficam ordenados por distância e reutilizados nos dois passes abaixo.
 
-2. **Full path** (`FULL_NPROBE = 20`): ativado quando `fraudCount ∈ {2, 3}` após o fast path. Nesses casos o score seria 0.4 ou 0.6 — exatamente na fronteira do threshold — então 15 clusters adicionais são vasculhados para um resultado mais confiante.
+1. **Fast path** (`FAST_NPROBE = 5`): vasculha apenas os 5 clusters mais próximos com L2 exato sobre `Int16Array`. Se o voto é unânime (0 ou 5 fraudes entre os top-5 vizinhos), retorna imediatamente — cobre ~97% das requisições. **Bbox pruning**: antes de varrer um cluster, calcula o lower-bound de distância até sua bounding box; se já é pior que o heap atual, o cluster inteiro é pulado. **Early exit parcial**: dentro do scan, a distância é acumulada em blocos de 4 dimensões — se após 4, 8 ou 12 dimensões já supera o pior do heap, o candidato é descartado.
+
+2. **Full path** (`FULL_NPROBE = 32`): ativado quando o voto não é unânime após o fast path (~3% das requisições). Vasculha os 27 clusters restantes do ranking já calculado, sem nenhuma busca de centroid adicional.
 
 **Heap máximo e score final:**
 
@@ -93,12 +95,12 @@ Ao final, `fraudCount` é o número de vizinhos no heap com label = 1 (fraude):
 
 | fraudCount | score | decisão |
 |------------|-------|---------|
-| 0 | 0.0 | aprovado |
-| 1 | 0.2 | aprovado |
-| 2 | 0.4 | aprovado (borderline → full path) |
-| 3 | 0.6 | negado (borderline → full path) |
-| 4 | 0.8 | negado |
-| 5 | 1.0 | negado |
+| 0 | 0.0 | aprovado (fast path) |
+| 1 | 0.2 | aprovado (→ full path) |
+| 2 | 0.4 | aprovado (→ full path) |
+| 3 | 0.6 | negado (→ full path) |
+| 4 | 0.8 | negado (→ full path) |
+| 5 | 1.0 | negado (fast path) |
 
 ### Respostas pré-computadas
 
@@ -111,7 +113,7 @@ RESPONSES[b] = Buffer.from(`HTTP/1.1 200 OK\r\nContent-Type: ...`);
 
 ### Warmup
 
-50 iterações de warmup são executadas na inicialização para aquecer o JIT do V8 antes de o HAProxy marcar o serviço como healthy.
+50 iterações de warmup são executadas na inicialização para aquecer o JIT do JavaScriptCore (JSC — engine do Bun) antes de o HAProxy marcar o serviço como healthy.
 
 ## Build do modelo (`scripts/build-ivf-flat.ts`)
 
@@ -119,7 +121,6 @@ Script offline que constrói o arquivo `resources/ivf-flat.bin` a partir de `res
 
 1. **k-means++** sobre 100k amostras → 2000 centroids (coarse quantizer)
 2. Atribuição de todos os N vetores ao centroid mais próximo
-3. **PQ training** (M=7 sub-quantizadores, K=256 codewords cada) sobre resíduos — usado apenas internamente para candidatos na etapa de avaliação; o runtime de inferência não usa PQ
-4. Reordenação por cluster + avaliação em 10k exemplos (acurácia, F1, FP, FN)
-5. Escrita do arquivo binário com layout fixo 
+3. Reordenação por cluster + avaliação em 10k exemplos (acurácia, F1, FP, FN)
+4. Escrita do arquivo binário com layout fixo
 
