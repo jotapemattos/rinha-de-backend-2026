@@ -1,10 +1,12 @@
-const FAST_NPROBE = 5;
-const FULL_NPROBE = 20;
+const FAST_NPROBE = Number(process.env.FAST_NPROBE ?? "5");
+const FULL_NPROBE = Number(process.env.FULL_NPROBE ?? "200");
 const K_FINAL = 5;
 
 const MODEL = "resources/ivf-flat.bin";
 if (!(await Bun.file(MODEL).exists()))
-  throw new Error(`IVF-Flat model not found — run: bun scripts/build-ivf-flat.ts`);
+  throw new Error(
+    `IVF-Flat model not found — run: bun scripts/build-ivf-flat.ts`,
+  );
 
 const headBuf = await Bun.file(MODEL).slice(0, 28).arrayBuffer();
 const headDv = new DataView(headBuf);
@@ -15,12 +17,21 @@ const K = headDv.getUint32(16, true);
 const DIMS = headDv.getUint32(24, true);
 const SUB = DIMS / M;
 
+// Layout: [hdr 28B][centroids][pqCodebooks][sizes][offsets][fraudCounts][bboxMin][bboxMax]
+//         [codes N*M][labels N][padding][vecs N*DIMS*2]
 const hdrBlockBytes =
-  28 + NLIST * DIMS * 4 + M * K * SUB * 4 + NLIST * 4 + NLIST * 4;
+  28 +
+  NLIST * DIMS * 4 +
+  M * K * SUB * 4 +
+  NLIST * 4 +
+  NLIST * 4 +
+  NLIST * 4 +
+  NLIST * DIMS * 2 * 2;
 const labelOffset = hdrBlockBytes + N * M;
 const vecsOffset = labelOffset + N + (N & 1);
 
 const hdrBuf = await Bun.file(MODEL).slice(0, hdrBlockBytes).arrayBuffer();
+// Skip loading PQ codes — exact L2 scan doesn't need them.
 const lblBuf = await Bun.file(MODEL)
   .slice(labelOffset, labelOffset + N)
   .arrayBuffer();
@@ -31,10 +42,15 @@ const vecsBuf = await Bun.file(MODEL)
 let byteOff = 28;
 const coarseCentroids = new Float32Array(hdrBuf, byteOff, NLIST * DIMS);
 byteOff += NLIST * DIMS * 4;
-byteOff += M * K * SUB * 4;
+byteOff += M * K * SUB * 4; // skip PQ codebooks
 const clusterSizes = new Uint32Array(hdrBuf, byteOff, NLIST);
 byteOff += NLIST * 4;
 const clusterOffsets = new Uint32Array(hdrBuf, byteOff, NLIST);
+byteOff += NLIST * 4;
+byteOff += NLIST * 4; // skip fraudCounts
+const bboxMin = new Int16Array(hdrBuf, byteOff, NLIST * DIMS);
+byteOff += NLIST * DIMS * 2;
+const bboxMax = new Int16Array(hdrBuf, byteOff, NLIST * DIMS);
 
 const sortedLabels = new Uint8Array(lblBuf);
 const sortedVecs = new Int16Array(vecsBuf);
@@ -42,10 +58,10 @@ const sortedVecs = new Int16Array(vecsBuf);
 // Pre-allocated buffers (single-threaded — safe to reuse per call).
 const _q = new Float32Array(DIMS);
 const _qS = new Int16Array(DIMS);
-const _probIdx = new Uint16Array(FULL_NPROBE); // top centroid indices, sorted by dist
+const _probIdx = new Uint16Array(FULL_NPROBE);
 const _probDist = new Float32Array(FULL_NPROBE);
 
-// Max-heap of size K_FINAL: root = worst (largest) distance in current top-5.
+// Result heap: top K_FINAL by exact L2. Root is the worst (largest) distance.
 const _hDist = new Float32Array(K_FINAL);
 const _hLabel = new Uint8Array(K_FINAL);
 let _hSize = 0;
@@ -88,9 +104,8 @@ function heapPush(dist: number, label: number): void {
   }
 }
 
-// Keep the top-nprobe nearest IVF centroids sorted by distance.
-// This intentionally supports both FAST_NPROBE=8 and FULL_NPROBE=24.
-// The fast path only keeps top-8; top-24 is recomputed only for borderline cases.
+// Heap-based top-nprobe centroid selection: O(NLIST × log nprobe) vs insertion-sort O(NLIST × nprobe).
+// _probDist/_probIdx are used as a max-heap during scanning, then sorted ascending at the end.
 function findTopCentroids(nprobe: number): void {
   const cc = coarseCentroids;
   const q0 = _q[0]!;
@@ -108,54 +123,9 @@ function findTopCentroids(nprobe: number): void {
   const q12 = _q[12]!;
   const q13 = _q[13]!;
 
-  for (let p = 0; p < nprobe; p++) {
-    _probIdx[p] = p;
-    const cBase = p * DIMS;
-    const d0 = q0 - cc[cBase]!;
-    const d1 = q1 - cc[cBase + 1]!;
-    const d2 = q2 - cc[cBase + 2]!;
-    const d3 = q3 - cc[cBase + 3]!;
-    const d4 = q4 - cc[cBase + 4]!;
-    const d5 = q5 - cc[cBase + 5]!;
-    const d6 = q6 - cc[cBase + 6]!;
-    const d7 = q7 - cc[cBase + 7]!;
-    const d8 = q8 - cc[cBase + 8]!;
-    const d9 = q9 - cc[cBase + 9]!;
-    const d10 = q10 - cc[cBase + 10]!;
-    const d11 = q11 - cc[cBase + 11]!;
-    const d12 = q12 - cc[cBase + 12]!;
-    const d13 = q13 - cc[cBase + 13]!;
-    _probDist[p] =
-      d0 * d0 +
-      d1 * d1 +
-      d2 * d2 +
-      d3 * d3 +
-      d4 * d4 +
-      d5 * d5 +
-      d6 * d6 +
-      d7 * d7 +
-      d8 * d8 +
-      d9 * d9 +
-      d10 * d10 +
-      d11 * d11 +
-      d12 * d12 +
-      d13 * d13;
-  }
+  let heapSize = 0;
 
-  for (let i = 1; i < nprobe; i++) {
-    const di = _probDist[i]!;
-    const ii = _probIdx[i]!;
-    let j = i;
-    while (j > 0 && _probDist[j - 1]! > di) {
-      _probDist[j] = _probDist[j - 1]!;
-      _probIdx[j] = _probIdx[j - 1]!;
-      j--;
-    }
-    _probDist[j] = di;
-    _probIdx[j] = ii;
-  }
-
-  for (let c = nprobe; c < NLIST; c++) {
+  for (let c = 0; c < NLIST; c++) {
     const cBase = c * DIMS;
     const d0 = q0 - cc[cBase]!;
     const d1 = q1 - cc[cBase + 1]!;
@@ -187,28 +157,187 @@ function findTopCentroids(nprobe: number): void {
       d12 * d12 +
       d13 * d13;
 
-    if (dist >= _probDist[nprobe - 1]!) continue;
+    if (heapSize < nprobe) {
+      // Fill phase: sift up into max-heap.
+      _probDist[heapSize] = dist;
+      _probIdx[heapSize] = c;
+      let i = heapSize++;
+      while (i > 0) {
+        const p = (i - 1) >> 1;
+        if (_probDist[p]! >= _probDist[i]!) break;
+        const td = _probDist[p]!;
+        _probDist[p] = _probDist[i]!;
+        _probDist[i] = td;
+        const ti = _probIdx[p]!;
+        _probIdx[p] = _probIdx[i]!;
+        _probIdx[i] = ti;
+        i = p;
+      }
+    } else if (dist < _probDist[0]!) {
+      // Replace heap root (worst so far) and sift down.
+      _probDist[0] = dist;
+      _probIdx[0] = c;
+      let i = 0;
+      while (true) {
+        const l = 2 * i + 1,
+          r = 2 * i + 2;
+        let lg = i;
+        if (l < nprobe && _probDist[l]! > _probDist[lg]!) lg = l;
+        if (r < nprobe && _probDist[r]! > _probDist[lg]!) lg = r;
+        if (lg === i) break;
+        const td = _probDist[i]!;
+        _probDist[i] = _probDist[lg]!;
+        _probDist[lg] = td;
+        const ti = _probIdx[i]!;
+        _probIdx[i] = _probIdx[lg]!;
+        _probIdx[lg] = ti;
+        i = lg;
+      }
+    }
+  }
 
-    let j = nprobe - 1;
-    while (j > 0 && _probDist[j - 1]! > dist) {
+  // Sort the nprobe results ascending by distance (insertion sort over small array).
+  for (let i = 1; i < nprobe; i++) {
+    const di = _probDist[i]!;
+    const ii = _probIdx[i]!;
+    let j = i;
+    while (j > 0 && _probDist[j - 1]! > di) {
       _probDist[j] = _probDist[j - 1]!;
       _probIdx[j] = _probIdx[j - 1]!;
       j--;
     }
-    _probDist[j] = dist;
-    _probIdx[j] = c;
+    _probDist[j] = di;
+    _probIdx[j] = ii;
   }
 }
 
-// Scan clusters [fromP, toP) using exact L2 with early termination.
-// Reads/updates the global max-heap (_hDist, _hLabel, _hSize).
-function scanClusters(fromP: number, toP: number): void {
+// Returns the bbox lower-bound distance from _qS to cluster c in i16² space.
+function bboxLb(c: number, worst: number): number {
+  const bOff = c * DIMS;
+  let lb = 0;
+  let e: number;
+  e =
+    _qS[0]! < bboxMin[bOff]!
+      ? bboxMin[bOff]! - _qS[0]!
+      : _qS[0]! > bboxMax[bOff]!
+        ? _qS[0]! - bboxMax[bOff]!
+        : 0;
+  lb += e * e;
+  if (lb >= worst) return lb;
+  e =
+    _qS[1]! < bboxMin[bOff + 1]!
+      ? bboxMin[bOff + 1]! - _qS[1]!
+      : _qS[1]! > bboxMax[bOff + 1]!
+        ? _qS[1]! - bboxMax[bOff + 1]!
+        : 0;
+  lb += e * e;
+  if (lb >= worst) return lb;
+  e =
+    _qS[2]! < bboxMin[bOff + 2]!
+      ? bboxMin[bOff + 2]! - _qS[2]!
+      : _qS[2]! > bboxMax[bOff + 2]!
+        ? _qS[2]! - bboxMax[bOff + 2]!
+        : 0;
+  lb += e * e;
+  if (lb >= worst) return lb;
+  e =
+    _qS[3]! < bboxMin[bOff + 3]!
+      ? bboxMin[bOff + 3]! - _qS[3]!
+      : _qS[3]! > bboxMax[bOff + 3]!
+        ? _qS[3]! - bboxMax[bOff + 3]!
+        : 0;
+  lb += e * e;
+  if (lb >= worst) return lb;
+  e =
+    _qS[4]! < bboxMin[bOff + 4]!
+      ? bboxMin[bOff + 4]! - _qS[4]!
+      : _qS[4]! > bboxMax[bOff + 4]!
+        ? _qS[4]! - bboxMax[bOff + 4]!
+        : 0;
+  lb += e * e;
+  if (lb >= worst) return lb;
+  e =
+    _qS[5]! < bboxMin[bOff + 5]!
+      ? bboxMin[bOff + 5]! - _qS[5]!
+      : _qS[5]! > bboxMax[bOff + 5]!
+        ? _qS[5]! - bboxMax[bOff + 5]!
+        : 0;
+  lb += e * e;
+  if (lb >= worst) return lb;
+  e =
+    _qS[6]! < bboxMin[bOff + 6]!
+      ? bboxMin[bOff + 6]! - _qS[6]!
+      : _qS[6]! > bboxMax[bOff + 6]!
+        ? _qS[6]! - bboxMax[bOff + 6]!
+        : 0;
+  lb += e * e;
+  if (lb >= worst) return lb;
+  e =
+    _qS[7]! < bboxMin[bOff + 7]!
+      ? bboxMin[bOff + 7]! - _qS[7]!
+      : _qS[7]! > bboxMax[bOff + 7]!
+        ? _qS[7]! - bboxMax[bOff + 7]!
+        : 0;
+  lb += e * e;
+  if (lb >= worst) return lb;
+  e =
+    _qS[8]! < bboxMin[bOff + 8]!
+      ? bboxMin[bOff + 8]! - _qS[8]!
+      : _qS[8]! > bboxMax[bOff + 8]!
+        ? _qS[8]! - bboxMax[bOff + 8]!
+        : 0;
+  lb += e * e;
+  if (lb >= worst) return lb;
+  e =
+    _qS[9]! < bboxMin[bOff + 9]!
+      ? bboxMin[bOff + 9]! - _qS[9]!
+      : _qS[9]! > bboxMax[bOff + 9]!
+        ? _qS[9]! - bboxMax[bOff + 9]!
+        : 0;
+  lb += e * e;
+  if (lb >= worst) return lb;
+  e =
+    _qS[10]! < bboxMin[bOff + 10]!
+      ? bboxMin[bOff + 10]! - _qS[10]!
+      : _qS[10]! > bboxMax[bOff + 10]!
+        ? _qS[10]! - bboxMax[bOff + 10]!
+        : 0;
+  lb += e * e;
+  if (lb >= worst) return lb;
+  e =
+    _qS[11]! < bboxMin[bOff + 11]!
+      ? bboxMin[bOff + 11]! - _qS[11]!
+      : _qS[11]! > bboxMax[bOff + 11]!
+        ? _qS[11]! - bboxMax[bOff + 11]!
+        : 0;
+  lb += e * e;
+  if (lb >= worst) return lb;
+  e =
+    _qS[12]! < bboxMin[bOff + 12]!
+      ? bboxMin[bOff + 12]! - _qS[12]!
+      : _qS[12]! > bboxMax[bOff + 12]!
+        ? _qS[12]! - bboxMax[bOff + 12]!
+        : 0;
+  lb += e * e;
+  if (lb >= worst) return lb;
+  e =
+    _qS[13]! < bboxMin[bOff + 13]!
+      ? bboxMin[bOff + 13]! - _qS[13]!
+      : _qS[13]! > bboxMax[bOff + 13]!
+        ? _qS[13]! - bboxMax[bOff + 13]!
+        : 0;
+  lb += e * e;
+  return lb;
+}
+
+// Scan clusters [fromP, toP) with exact Int16 L2, accumulating into the K_FINAL heap.
+// The heap persists across calls so fast + full scans share the same top-K.
+// Partial-sum early exit: bail after first 4 dims if already worse than heap top.
+function scanClustersExact(fromP: number, toP: number): void {
   const sv = sortedVecs;
   const sl = sortedLabels;
-  const probIdx = _probIdx;
   const offsets = clusterOffsets;
   const sizes = clusterSizes;
-
   const q0 = _qS[0]!;
   const q1 = _qS[1]!;
   const q2 = _qS[2]!;
@@ -225,62 +354,42 @@ function scanClusters(fromP: number, toP: number): void {
   const q13 = _qS[13]!;
 
   for (let p = fromP; p < toP; p++) {
-    const c = probIdx[p]!;
+    const c = _probIdx[p]!;
+    if (_hSize >= K_FINAL && bboxLb(c, _hDist[0]!) >= _hDist[0]!) continue;
+
     const cOff = offsets[c]!;
-    const cSz = sizes[c]!;
-    const end = cOff + cSz;
+    const end = cOff + sizes[c]!;
 
     for (let row = cOff; row < end; row++) {
       const vBase = row * DIMS;
-
       const e0 = q0 - sv[vBase]!;
       const e1 = q1 - sv[vBase + 1]!;
       const e2 = q2 - sv[vBase + 2]!;
       const e3 = q3 - sv[vBase + 3]!;
-
-      const partial4 = e0 * e0 + e1 * e1 + e2 * e2 + e3 * e3;
-
-      if (_hSize >= K_FINAL && partial4 >= _hDist[0]!) continue;
-
+      let dist = e0 * e0 + e1 * e1 + e2 * e2 + e3 * e3;
+      if (_hSize >= K_FINAL && dist >= _hDist[0]!) continue;
       const e4 = q4 - sv[vBase + 4]!;
       const e5 = q5 - sv[vBase + 5]!;
       const e6 = q6 - sv[vBase + 6]!;
       const e7 = q7 - sv[vBase + 7]!;
-
-      const partial8 = partial4 + e4 * e4 + e5 * e5 + e6 * e6 + e7 * e7;
-
-      if (_hSize >= K_FINAL && partial8 >= _hDist[0]!) continue;
-
+      dist += e4 * e4 + e5 * e5 + e6 * e6 + e7 * e7;
+      if (_hSize >= K_FINAL && dist >= _hDist[0]!) continue;
       const e8 = q8 - sv[vBase + 8]!;
       const e9 = q9 - sv[vBase + 9]!;
       const e10 = q10 - sv[vBase + 10]!;
       const e11 = q11 - sv[vBase + 11]!;
+      dist += e8 * e8 + e9 * e9 + e10 * e10 + e11 * e11;
+      if (_hSize >= K_FINAL && dist >= _hDist[0]!) continue;
       const e12 = q12 - sv[vBase + 12]!;
       const e13 = q13 - sv[vBase + 13]!;
-
-      heapPush(
-        partial8 +
-          e8 * e8 +
-          e9 * e9 +
-          e10 * e10 +
-          e11 * e11 +
-          e12 * e12 +
-          e13 * e13,
-        sl[row]!,
-      );
+      dist += e12 * e12 + e13 * e13;
+      heapPush(dist, sl[row]!);
     }
   }
 }
 
-function fraudCountFromHeap(): number {
-  let fraudCount = 0;
-  for (let i = 0; i < _hSize; i++) fraudCount += _hLabel[i]!;
-  return fraudCount;
-}
-
-function decideFromHeap(fraudCount: number): number {
-  return fraudCount / K_FINAL;
-}
+let fastPathCount = 0;
+let fullPathCount = 0;
 
 export function ivfFlatScore(vec: Float32Array): number {
   for (let d = 0; d < DIMS; d++) {
@@ -289,20 +398,26 @@ export function ivfFlatScore(vec: Float32Array): number {
     _qS[d] = Math.round(x * 32767);
   }
 
+  // Single centroid search upfront — avoids rescanning all NLIST centroids twice.
+  // Fast-path check: if the top FAST_NPROBE clusters already give a unanimous vote,
+  // return immediately without scanning the remaining [FAST_NPROBE, FULL_NPROBE) clusters.
   findTopCentroids(FULL_NPROBE);
-
   _hSize = 0;
-  scanClusters(0, FAST_NPROBE);
+  scanClustersExact(0, FAST_NPROBE);
 
-  let fraudCount = fraudCountFromHeap();
+  let fraudCount = 0;
+  for (let i = 0; i < _hSize; i++) fraudCount += _hLabel[i]!;
 
-  if (fraudCount !== 2 && fraudCount !== 3) {
-    return decideFromHeap(fraudCount);
+  if (fraudCount === 0 || fraudCount === K_FINAL) {
+    fastPathCount++;
+    return fraudCount / K_FINAL;
   }
 
-  scanClusters(FAST_NPROBE, FULL_NPROBE);
+  // Ambiguous: scan the remaining clusters already ranked by centroid distance.
+  scanClustersExact(FAST_NPROBE, FULL_NPROBE);
+  fraudCount = 0;
+  for (let i = 0; i < _hSize; i++) fraudCount += _hLabel[i]!;
+  fullPathCount++;
 
-  fraudCount = fraudCountFromHeap();
-
-  return decideFromHeap(fraudCount);
+  return fraudCount / K_FINAL;
 }

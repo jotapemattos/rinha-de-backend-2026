@@ -109,7 +109,8 @@ Bun.listen<SocketState>({
 
         const bodyStart = hEnd + 4;
 
-        if (buf[offset] === 71 /* 'G' — GET /ready */) {
+        if (buf[offset] === 71 /* 'G' */) {
+          /* GET /ready */
           socket.write(READY_RESP);
           offset = bodyStart;
           continue;
