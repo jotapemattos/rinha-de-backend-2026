@@ -1,8 +1,9 @@
 x-api: &api
-  image: jotapemattos/rinha-de-backend-2026:v5
+  image: jotapemattos/rinha-de-backend-2026:v6
   restart: always
   volumes:
     - socks:/socks
+  cpu_period: 20000
   deploy:
     resources:
       limits:
@@ -36,11 +37,10 @@ services:
       start_period: 5s
       retries: 15
 
-  haproxy:
-    image: haproxy:alpine
+  lb:
+    image: jotapemattos/rinha-de-backend-2026-lb:v1
     restart: always
     volumes:
-      - ./haproxy.cfg:/usr/local/etc/haproxy/haproxy.cfg:ro
       - socks:/socks
     ports:
       - "9999:9999"
@@ -49,6 +49,7 @@ services:
         condition: service_healthy
       api2:
         condition: service_healthy
+    cpu_period: 20000
     deploy:
       resources:
         limits:
