@@ -8,8 +8,8 @@ Solução para a Rinha de Backend 2026. O desafio consiste em classificar transa
 Cliente HTTP
      │
      ▼
-HAProxy :9999  (round-robin, keep-alive)
-     │           via Unix Domain Socket
+C LB :9999  (round-robin, epoll, splice)
+     │        via Unix Domain Socket
      ├──────────────────────────────────┐
      ▼                                  ▼
   api1 (Bun)                        api2 (Bun)
@@ -18,7 +18,7 @@ HAProxy :9999  (round-robin, keep-alive)
      └── TCP raw parser → Vectorizer → IVF-Flat scorer → resposta pré-computada
 ```
 
-Dois processos Bun independentes recebem requisições via **Unix Domain Sockets (UDS)**. O HAProxy faz o balanceamento em round-robin sem banco de dados, cache externo ou qualquer dependência de rede entre as instâncias.
+Dois processos Bun independentes recebem requisições via **Unix Domain Sockets (UDS)**. O load balancer é um binário C estático (~170 LoC) com `epoll` edge-triggered que faz round-robin puro sem inspecionar o payload — sem banco de dados, cache externo ou qualquer dependência de rede entre as instâncias.
 
 ## Orçamento de recursos (docker-compose)
 
@@ -26,7 +26,7 @@ Dois processos Bun independentes recebem requisições via **Unix Domain Sockets
 |----------|-------|---------|
 | api1     | 0.45  | 160 MB  |
 | api2     | 0.45  | 160 MB  |
-| haproxy  | 0.10  | 20 MB   |
+| lb       | 0.10  | 20 MB   |
 | **Total**| **1.0**| **340 MB** |
 
 Os sockets ficam em um volume `tmpfs` compartilhado entre os containers, zerando a latência de I/O de rede.
@@ -113,7 +113,7 @@ RESPONSES[b] = Buffer.from(`HTTP/1.1 200 OK\r\nContent-Type: ...`);
 
 ### Warmup
 
-50 iterações de warmup são executadas na inicialização para aquecer o JIT do JavaScriptCore (JSC — engine do Bun) antes de o HAProxy marcar o serviço como healthy.
+50 iterações de warmup são executadas na inicialização para aquecer o JIT do JavaScriptCore (JSC — engine do Bun) antes de o LB marcar o serviço como healthy via healthcheck no socket UDS.
 
 ## Build do modelo (`scripts/build-ivf-flat.ts`)
 
