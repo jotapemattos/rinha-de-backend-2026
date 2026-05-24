@@ -3,7 +3,7 @@ x-api: &api
   restart: always
   volumes:
     - socks:/socks
-  cpu_period: 20000
+
   deploy:
     resources:
       limits:
@@ -49,7 +49,7 @@ services:
         condition: service_healthy
       api2:
         condition: service_healthy
-    cpu_period: 20000
+  
     deploy:
       resources:
         limits:
