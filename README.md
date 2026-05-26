@@ -24,10 +24,10 @@ Dois processos Bun independentes recebem requisições via **Unix Domain Sockets
 
 | Serviço  | CPU   | Memória |
 |----------|-------|---------|
-| api1     | 0.45  | 160 MB  |
-| api2     | 0.45  | 160 MB  |
+| api1     | 0.45  | 165 MB  |
+| api2     | 0.45  | 165 MB  |
 | lb       | 0.10  | 20 MB   |
-| **Total**| **1.0**| **340 MB** |
+| **Total**| **1.0**| **350 MB** |
 
 Os sockets ficam em um volume `tmpfs` compartilhado entre os containers, zerando a latência de I/O de rede.
 
