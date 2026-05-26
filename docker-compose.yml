@@ -8,13 +8,13 @@ x-api: &api
     resources:
       limits:
         cpus: "0.45"
-        memory: "160MB"
+        memory: "165MB"
 
 services:
   api1:
     <<: *api
     environment:
-      FAST_NPROBE: 16
+      FAST_NPROBE: 20
       FULL_NPROBE: 32
       UDS_PATH: /socks/api1.sock
     healthcheck:
@@ -27,7 +27,7 @@ services:
   api2:
     <<: *api
     environment:
-      FAST_NPROBE: 16
+      FAST_NPROBE: 20
       FULL_NPROBE: 32
       UDS_PATH: /socks/api2.sock
     healthcheck:
