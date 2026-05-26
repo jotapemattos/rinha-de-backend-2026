@@ -48,3 +48,14 @@ resources/ivf-flat.bin
 .scratch
 skills-lock.json
 docs/
+
+# local
+docker-compose.override.yaml
+docker-compose.throttled.yaml
+test/
+
+# profilinig
+measure-recall.ts
+profile-search.ts
+profile-vectorize.ts
+
