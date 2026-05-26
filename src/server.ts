@@ -1,20 +1,9 @@
 import * as FraudService from "./modules/fraud/service.ts";
-import type { FraudScoreRequest } from "./modules/fraud/types.ts";
 
-const _warmup: FraudScoreRequest = {
-  id: "warmup",
-  transaction: {
-    amount: 100,
-    installments: 1,
-    requested_at: "2025-01-15T14:30:00Z",
-  },
-  customer: { avg_amount: 100, tx_count_24h: 1, known_merchants: [] },
-  merchant: { id: "m1", mcc: "5411", avg_amount: 100 },
-  terminal: { km_from_home: 5, is_online: false, card_present: true },
-  last_transaction: null,
-};
-const _warmupText = JSON.stringify(_warmup);
-for (let i = 0; i < 50; i++) FraudService.scoreTransactionFromText(_warmupText);
+const _warmupBuf = Buffer.from(
+  '{"id":"warmup","transaction":{"amount":100,"installments":1,"requested_at":"2025-01-15T14:30:00Z"},"customer":{"avg_amount":100,"tx_count_24h":1,"known_merchants":[]},"merchant":{"id":"m1","mcc":"5411","avg_amount":100},"terminal":{"km_from_home":5,"is_online":false,"card_present":true},"last_transaction":null}',
+);
+for (let i = 0; i < 50; i++) FraudService.scoreTransactionFromBuffer(_warmupBuf, 0, _warmupBuf.length);
 
 const N_BUCKETS = 256;
 const THRESHOLD = 0.6;
@@ -128,13 +117,7 @@ Bun.listen<SocketState>({
           break;
         }
 
-        const bodyText = buf.toString(
-          "utf8",
-          bodyStart,
-          bodyStart + contentLength,
-        );
-
-        const prob = FraudService.scoreTransactionFromText(bodyText);
+        const prob = FraudService.scoreTransactionFromBuffer(buf, bodyStart, bodyStart + contentLength);
         let bucket = (prob * (N_BUCKETS - 1)) | 0;
         if (bucket < 0) bucket = 0;
         else if (bucket >= N_BUCKETS) bucket = N_BUCKETS - 1;
