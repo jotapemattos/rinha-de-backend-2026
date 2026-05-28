@@ -26,7 +26,7 @@ jobs:
           context: .
           platforms: linux/amd64
           push: true
-          tags: jotapemattos/rinha-de-backend-2026:v8
+          tags: jotapemattos/rinha-de-backend-2026:v9
           no-cache: true
 
       - name: Build and push LB

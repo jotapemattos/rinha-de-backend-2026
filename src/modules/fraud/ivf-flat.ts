@@ -400,6 +400,21 @@ function scanClustersExact(fromP: number, toP: number): void {
 let fastPathCount = 0;
 let fullPathCount = 0;
 
+// Forces both scanClustersExact branches through the JIT regardless of vec content.
+// Call this during server warmup so the full-path code is FTL-compiled before real traffic.
+export function ivfFlatWarmupBothPaths(vec: Float32Array): void {
+  for (let d = 0; d < DIMS; d++) {
+    const x = Math.max(-1, Math.min(1, vec[d]!));
+    _q[d] = x;
+    _qS[d] = Math.round(x * 32767);
+  }
+  findTopCentroids(FULL_NPROBE);
+  _hSize = 0;
+  scanClustersExact(0, FAST_NPROBE);
+  scanClustersExact(FAST_NPROBE, FULL_NPROBE);
+  _hSize = 0;
+}
+
 export function ivfFlatScore(vec: Float32Array): number {
   for (let d = 0; d < DIMS; d++) {
     const x = Math.max(-1, Math.min(1, vec[d]!));
