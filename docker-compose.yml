@@ -14,7 +14,7 @@ services:
   api1:
     <<: *api
     environment:
-      FAST_NPROBE: 8
+      FAST_NPROBE: 16
       FULL_NPROBE: 64
       UDS_PATH: /socks/api1.sock
     healthcheck:
@@ -27,7 +27,7 @@ services:
   api2:
     <<: *api
     environment:
-      FAST_NPROBE: 8
+      FAST_NPROBE: 16
       FULL_NPROBE: 64
       UDS_PATH: /socks/api2.sock
     healthcheck:
