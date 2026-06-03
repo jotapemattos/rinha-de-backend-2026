@@ -53,7 +53,7 @@ services:
     deploy:
       resources:
         limits:
-          cpus: "0.30"
+          cpus: "0.10"
           memory: "10MB"
 
 volumes:
