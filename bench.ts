@@ -1,7 +1,14 @@
 import { run, bench, group, do_not_optimize } from "mitata";
 import { vectorizeFromBuffer } from "./src/modules/fraud/vectorize.ts";
-import { ivfFlatScore, getPathStats, resetPathStats } from "./src/modules/fraud/ivf-flat.ts";
-import { scoreTransactionFromBuffer, warmupBothPaths } from "./src/modules/fraud/service.ts";
+import {
+  ivfFlatScore,
+  getPathStats,
+  resetPathStats,
+} from "./src/modules/fraud/ivf-flat.ts";
+import {
+  scoreTransactionFromBuffer,
+  warmupBothPaths,
+} from "./src/modules/fraud/service.ts";
 
 // Three representative shapes:
 // LEGIT   — small known-merchant grocery, card present, close to home
@@ -35,21 +42,33 @@ const stats = getPathStats();
 const total = stats.fastPathCount + stats.fullPathCount;
 console.log(
   `\nPath split over 30k calls (10k × 3 payloads):` +
-  `\n  fast  ${stats.fastPathCount.toLocaleString()} / ${total.toLocaleString()} (${((stats.fastPathCount / total) * 100).toFixed(1)}%)` +
-  `\n  full  ${stats.fullPathCount.toLocaleString()} / ${total.toLocaleString()} (${((stats.fullPathCount / total) * 100).toFixed(1)}%)\n`,
+    `\n  fast  ${stats.fastPathCount.toLocaleString()} / ${total.toLocaleString()} (${((stats.fastPathCount / total) * 100).toFixed(1)}%)` +
+    `\n  full  ${stats.fullPathCount.toLocaleString()} / ${total.toLocaleString()} (${((stats.fullPathCount / total) * 100).toFixed(1)}%)\n`,
 );
 resetPathStats();
 
 group("phase breakdown (legit payload)", () => {
-  bench("vectorize", () => do_not_optimize(vectorizeFromBuffer(LEGIT, 0, LEGIT.length)));
-  bench("ivfFlatScore", () => do_not_optimize(ivfFlatScore(vectorizeFromBuffer(LEGIT, 0, LEGIT.length))));
-  bench("end-to-end", () => do_not_optimize(scoreTransactionFromBuffer(LEGIT, 0, LEGIT.length)));
+  bench("vectorize", () =>
+    do_not_optimize(vectorizeFromBuffer(LEGIT, 0, LEGIT.length)),
+  );
+  bench("ivfFlatScore", () =>
+    do_not_optimize(ivfFlatScore(vectorizeFromBuffer(LEGIT, 0, LEGIT.length))),
+  );
+  bench("end-to-end", () =>
+    do_not_optimize(scoreTransactionFromBuffer(LEGIT, 0, LEGIT.length)),
+  );
 });
 
 group("fast vs full path", () => {
-  bench("legit  (→ fast path expected)", () => do_not_optimize(scoreTransactionFromBuffer(LEGIT, 0, LEGIT.length)));
-  bench("fraud  (→ fast path expected)", () => do_not_optimize(scoreTransactionFromBuffer(FRAUD, 0, FRAUD.length)));
-  bench("border (→ full path expected)", () => do_not_optimize(scoreTransactionFromBuffer(BORDER, 0, BORDER.length)));
+  bench("legit  (→ fast path expected)", () =>
+    do_not_optimize(scoreTransactionFromBuffer(LEGIT, 0, LEGIT.length)),
+  );
+  bench("fraud  (→ fast path expected)", () =>
+    do_not_optimize(scoreTransactionFromBuffer(FRAUD, 0, FRAUD.length)),
+  );
+  bench("border (→ full path expected)", () =>
+    do_not_optimize(scoreTransactionFromBuffer(BORDER, 0, BORDER.length)),
+  );
 });
 
 await run({ avg: true, min_max: true, percentiles: true });
