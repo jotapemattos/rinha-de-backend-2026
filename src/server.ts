@@ -3,7 +3,8 @@ import * as FraudService from "./modules/fraud/service.ts";
 const _warmupBuf = Buffer.from(
   '{"id":"warmup","transaction":{"amount":100,"installments":1,"requested_at":"2025-01-15T14:30:00Z"},"customer":{"avg_amount":100,"tx_count_24h":1,"known_merchants":[]},"merchant":{"id":"m1","mcc":"5411","avg_amount":100},"terminal":{"km_from_home":5,"is_online":false,"card_present":true},"last_transaction":null}',
 );
-for (let i = 0; i < 5000; i++) FraudService.warmupBothPaths(_warmupBuf, 0, _warmupBuf.length);
+for (let i = 0; i < 50_000; i++)
+  FraudService.warmupBothPaths(_warmupBuf, 0, _warmupBuf.length);
 Bun.gc(true);
 
 const N_BUCKETS = 256;
@@ -118,7 +119,11 @@ Bun.listen<SocketState>({
           break;
         }
 
-        const prob = FraudService.scoreTransactionFromBuffer(buf, bodyStart, bodyStart + contentLength);
+        const prob = FraudService.scoreTransactionFromBuffer(
+          buf,
+          bodyStart,
+          bodyStart + contentLength,
+        );
         let bucket = (prob * (N_BUCKETS - 1)) | 0;
         if (bucket < 0) bucket = 0;
         else if (bucket >= N_BUCKETS) bucket = N_BUCKETS - 1;
