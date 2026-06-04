@@ -1,5 +1,5 @@
 x-api: &api
-  image: jotapemattos/rinha-de-backend-2026:v10
+  image: jotapemattos/rinha-de-backend-2026:v14
   restart: always
   volumes:
     - socks:/socks
