@@ -46,7 +46,8 @@ const clusterSizes = new Uint32Array(buffer, byteOff, NLIST);
 byteOff += NLIST * 4;
 const clusterOffsets = new Uint32Array(buffer, byteOff, NLIST);
 byteOff += NLIST * 4;
-byteOff += NLIST * 4; // skip fraudCounts
+const clusterFraudCounts = new Uint32Array(buffer, byteOff, NLIST);
+byteOff += NLIST * 4;
 const bboxMin = new Int16Array(buffer, byteOff, NLIST * DIMS);
 byteOff += NLIST * DIMS * 2;
 const bboxMax = new Int16Array(buffer, byteOff, NLIST * DIMS);
@@ -341,12 +342,19 @@ function bboxLb(c: number, worst: number): number {
 
 // Scan clusters [fromP, toP) with exact Int16 L2, accumulating into the K_FINAL heap.
 // The heap persists across calls so fast + full scans share the same top-K.
-// Partial-sum early exit: bail after first 4 dims if already worse than heap top.
-function scanClustersExact(fromP: number, toP: number): void {
+// Returns true if the heap reached a unanimous verdict mid-scan (caller may stop early).
+//
+// Two additional pruning strategies on top of bbox:
+//   1. Pure-label skip: if a cluster contains only one label and the heap is already
+//      unanimously that same label, scanning it cannot change the vote — skip it.
+//   2. Per-cluster unanimity check: after each cluster, if the heap is full and all
+//      K_FINAL neighbors share the same label, the verdict is decided — return early.
+function scanClustersExact(fromP: number, toP: number): boolean {
   const sv = sortedVecs;
   const sl = sortedLabels;
   const offsets = clusterOffsets;
   const sizes = clusterSizes;
+  const fraudCounts = clusterFraudCounts;
   const q0 = _qS[0]!;
   const q1 = _qS[1]!;
   const q2 = _qS[2]!;
@@ -366,8 +374,18 @@ function scanClustersExact(fromP: number, toP: number): void {
     const c = _probIdx[p]!;
     if (_hSize >= K_FINAL && bboxLb(c, _hDist[0]!) >= _hDist[0]!) continue;
 
+    // Pure-label skip: a cluster with only one label cannot change the vote when
+    // the heap is already unanimous with that same label.
+    const fraudC = fraudCounts[c]!;
+    const sizeC = sizes[c]!;
+    if (_hSize >= K_FINAL && (fraudC === 0 || fraudC === sizeC)) {
+      let fc = 0;
+      for (let i = 0; i < K_FINAL; i++) fc += _hLabel[i]!;
+      if ((fraudC === 0 && fc === 0) || (fraudC === sizeC && fc === K_FINAL)) continue;
+    }
+
     const cOff = offsets[c]!;
-    const end = cOff + sizes[c]!;
+    const end = cOff + sizeC;
 
     for (let row = cOff; row < end; row++) {
       const vBase = row * DIMS;
@@ -394,7 +412,16 @@ function scanClustersExact(fromP: number, toP: number): void {
       dist += e12 * e12 + e13 * e13;
       heapPush(dist, sl[row]!);
     }
+
+    // Per-cluster unanimity check: if all K_FINAL neighbors now share a label,
+    // the verdict is decided regardless of remaining clusters.
+    if (_hSize >= K_FINAL) {
+      let fc = 0;
+      for (let i = 0; i < K_FINAL; i++) fc += _hLabel[i]!;
+      if (fc === 0 || fc === K_FINAL) return true;
+    }
   }
+  return false;
 }
 
 let fastPathCount = 0;
@@ -410,11 +437,10 @@ export function ivfFlatWarmupBothPaths(vec: Float32Array): void {
     _q[d] = x;
     _qS[d] = Math.round(x * 32767);
   }
-  findTopCentroids(FAST_NPROBE);
+  findTopCentroids(FULL_NPROBE);
   _hSize = 0;
   scanClustersExact(0, FAST_NPROBE);
   _hSize = 0;
-  findTopCentroids(FULL_NPROBE);
   scanClustersExact(FAST_NPROBE, FULL_NPROBE);
   _hSize = 0;
 }
@@ -426,9 +452,10 @@ export function ivfFlatScore(vec: Float32Array): number {
     _qS[d] = Math.round(x * 32767);
   }
 
-  // Two-pass centroid search: find top-FAST_NPROBE first (tiny heap + trivial sort).
-  // 66% of requests are unanimous at this point and return immediately.
-  findTopCentroids(FAST_NPROBE);
+  // Single centroid search upfront — avoids rescanning all NLIST centroids twice.
+  // Fast-path check: if the top FAST_NPROBE clusters already give a unanimous vote,
+  // return immediately without scanning the remaining [FAST_NPROBE, FULL_NPROBE) clusters.
+  findTopCentroids(FULL_NPROBE);
   _hSize = 0;
   scanClustersExact(0, FAST_NPROBE);
 
@@ -440,9 +467,7 @@ export function ivfFlatScore(vec: Float32Array): number {
     return fraudCount / K_FINAL;
   }
 
-  // Ambiguous: rescan all centroids for full top-FULL_NPROBE set, keeping fast-path
-  // heap candidates, then scan the remaining [FAST_NPROBE, FULL_NPROBE) clusters.
-  findTopCentroids(FULL_NPROBE);
+  // Ambiguous: scan the remaining clusters already ranked by centroid distance.
   scanClustersExact(FAST_NPROBE, FULL_NPROBE);
   fraudCount = 0;
   for (let i = 0; i < _hSize; i++) fraudCount += _hLabel[i]!;
