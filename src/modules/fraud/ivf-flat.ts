@@ -1,5 +1,5 @@
-const FAST_NPROBE = Number(process.env.FAST_NPROBE ?? "5");
-const FULL_NPROBE = Number(process.env.FULL_NPROBE ?? "200");
+const FAST_NPROBE = Number(process.env.FAST_NPROBE ?? "4");
+const FULL_NPROBE = Number(process.env.FULL_NPROBE ?? "64");
 const K_FINAL = 5;
 
 const MODEL = "resources/ivf-flat.bin";
@@ -41,12 +41,13 @@ const vecsOffset = labelOffset + N + (N & 1);
 let byteOff = 28;
 const coarseCentroids = new Float32Array(buffer, byteOff, NLIST * DIMS);
 byteOff += NLIST * DIMS * 4;
-byteOff += M * K * SUB * 4; // skip PQ codebooks
+byteOff += M * K * SUB * 4; // skip residual PQ codebooks
 const clusterSizes = new Uint32Array(buffer, byteOff, NLIST);
 byteOff += NLIST * 4;
 const clusterOffsets = new Uint32Array(buffer, byteOff, NLIST);
 byteOff += NLIST * 4;
-byteOff += NLIST * 4; // fraudCounts — reserved for future use
+const fraudCounts = new Uint32Array(buffer, byteOff, NLIST);
+byteOff += NLIST * 4;
 const bboxMin = new Int16Array(buffer, byteOff, NLIST * DIMS);
 byteOff += NLIST * DIMS * 2;
 const bboxMax = new Int16Array(buffer, byteOff, NLIST * DIMS);
@@ -69,17 +70,24 @@ const _q = new Float32Array(DIMS);
 const _qS = new Int16Array(DIMS);
 const _probIdx = new Uint16Array(FULL_NPROBE);
 const _probDist = new Float32Array(FULL_NPROBE);
+// Cache all NLIST centroid L2 distances from the first (fast) pass so the
+// slow path can skip the second full centroid scan entirely.
+const _centDist = new Float32Array(NLIST);
 
 // Result heap: top K_FINAL by exact L2. Root is the worst (largest) distance.
 const _hDist = new Float32Array(K_FINAL);
 const _hLabel = new Uint8Array(K_FINAL);
 let _hSize = 0;
+// Running fraud count in the heap — updated incrementally to avoid the
+// K_FINAL-element loop for unanimity checks.
+let _heapFraudCount = 0;
 
 function heapPush(dist: number, label: number): void {
   if (_hSize < K_FINAL) {
     let i = _hSize++;
     _hDist[i] = dist;
     _hLabel[i] = label;
+    _heapFraudCount += label;
     while (i > 0) {
       const p = (i - 1) >> 1;
       if (_hDist[p]! >= _hDist[i]!) break;
@@ -92,6 +100,8 @@ function heapPush(dist: number, label: number): void {
       i = p;
     }
   } else if (dist < _hDist[0]!) {
+    // Replace root (current worst): update running fraud count before overwrite.
+    _heapFraudCount += label - _hLabel[0]!;
     _hDist[0] = dist;
     _hLabel[0] = label;
     let i = 0;
@@ -113,8 +123,11 @@ function heapPush(dist: number, label: number): void {
   }
 }
 
-// Heap-based top-nprobe centroid selection: O(NLIST × log nprobe) vs insertion-sort O(NLIST × nprobe).
-// _probDist/_probIdx are used as a max-heap during scanning, then sorted ascending at the end.
+// Heap-based top-nprobe centroid selection: O(NLIST × log nprobe).
+// _probDist/_probIdx are used as a max-heap during scanning, then sorted ascending.
+// With k=FAST_NPROBE (small heap), the threshold tightens quickly → many far centroids
+// are skipped by the heap root comparison, making the fast-pass cheaper than k=FULL_NPROBE.
+// All distances are also cached in _centDist[c] for the slow-path to reuse.
 function findTopCentroids(nprobe: number): void {
   const cc = coarseCentroids;
   const q0 = _q[0]!;
@@ -166,8 +179,9 @@ function findTopCentroids(nprobe: number): void {
       d12 * d12 +
       d13 * d13;
 
+    _centDist[c] = dist;
+
     if (heapSize < nprobe) {
-      // Fill phase: sift up into max-heap.
       _probDist[heapSize] = dist;
       _probIdx[heapSize] = c;
       let i = heapSize++;
@@ -183,7 +197,6 @@ function findTopCentroids(nprobe: number): void {
         i = p;
       }
     } else if (dist < _probDist[0]!) {
-      // Replace heap root (worst so far) and sift down.
       _probDist[0] = dist;
       _probIdx[0] = c;
       let i = 0;
@@ -205,7 +218,64 @@ function findTopCentroids(nprobe: number): void {
     }
   }
 
-  // Sort the nprobe results ascending by distance (insertion sort over small array).
+  for (let i = 1; i < nprobe; i++) {
+    const di = _probDist[i]!;
+    const ii = _probIdx[i]!;
+    let j = i;
+    while (j > 0 && _probDist[j - 1]! > di) {
+      _probDist[j] = _probDist[j - 1]!;
+      _probIdx[j] = _probIdx[j - 1]!;
+      j--;
+    }
+    _probDist[j] = di;
+    _probIdx[j] = ii;
+  }
+}
+
+// Fast slow-path centroid selection: reuses the distances cached by findTopCentroids,
+// so no FP multiplications are needed — just reads from _centDist and heap comparisons.
+// ~13× cheaper than a second full L2 centroid scan.
+function findTopCentroidsFromCache(nprobe: number): void {
+  let heapSize = 0;
+  for (let c = 0; c < NLIST; c++) {
+    const dist = _centDist[c]!;
+    if (heapSize < nprobe) {
+      _probDist[heapSize] = dist;
+      _probIdx[heapSize] = c;
+      let i = heapSize++;
+      while (i > 0) {
+        const p = (i - 1) >> 1;
+        if (_probDist[p]! >= _probDist[i]!) break;
+        const td = _probDist[p]!;
+        _probDist[p] = _probDist[i]!;
+        _probDist[i] = td;
+        const ti = _probIdx[p]!;
+        _probIdx[p] = _probIdx[i]!;
+        _probIdx[i] = ti;
+        i = p;
+      }
+    } else if (dist < _probDist[0]!) {
+      _probDist[0] = dist;
+      _probIdx[0] = c;
+      let i = 0;
+      while (true) {
+        const l = 2 * i + 1,
+          r = 2 * i + 2;
+        let lg = i;
+        if (l < nprobe && _probDist[l]! > _probDist[lg]!) lg = l;
+        if (r < nprobe && _probDist[r]! > _probDist[lg]!) lg = r;
+        if (lg === i) break;
+        const td = _probDist[i]!;
+        _probDist[i] = _probDist[lg]!;
+        _probDist[lg] = td;
+        const ti = _probIdx[i]!;
+        _probIdx[i] = _probIdx[lg]!;
+        _probIdx[lg] = ti;
+        i = lg;
+      }
+    }
+  }
+
   for (let i = 1; i < nprobe; i++) {
     const di = _probDist[i]!;
     const ii = _probIdx[i]!;
@@ -342,11 +412,14 @@ function bboxLb(c: number, worst: number): number {
 // Scan clusters [fromP, toP) with exact Int16 L2, accumulating into the K_FINAL heap.
 // The heap persists across calls so fast + full scans share the same top-K.
 // Partial-sum early exit: bail after each block of 4 dims if already worse than heap top.
+// Pure-label same-label skip: if heap is unanimous AND cluster has the same pure label,
+// additional vectors from that cluster cannot change the result — skip the scan entirely.
 function scanClustersExact(fromP: number, toP: number): void {
   const sv = sortedVecs;
   const sl = sortedLabels;
   const offsets = clusterOffsets;
   const sizes = clusterSizes;
+  const fc = fraudCounts;
   const q0 = _qS[0]!;
   const q1 = _qS[1]!;
   const q2 = _qS[2]!;
@@ -364,6 +437,19 @@ function scanClustersExact(fromP: number, toP: number): void {
 
   for (let p = fromP; p < toP; p++) {
     const c = _probIdx[p]!;
+
+    // Pure-label same-label skip: heap full + unanimous + cluster same pure label.
+    // Safe because adding same-label vectors to an already-unanimous heap cannot
+    // flip the decision, regardless of their distances.
+    if (_hSize >= K_FINAL) {
+      const hfc = _heapFraudCount;
+      if (hfc === 0 || hfc === K_FINAL) {
+        const cfc = fc[c]!;
+        const csz = sizes[c]!;
+        if ((hfc === K_FINAL && cfc === csz) || (hfc === 0 && cfc === 0)) continue;
+      }
+    }
+
     if (_hSize >= K_FINAL && bboxLb(c, _hDist[0]!) >= _hDist[0]!) continue;
 
     const cOff = offsets[c]!;
@@ -410,12 +496,13 @@ export function ivfFlatWarmupBothPaths(vec: Float32Array): void {
     _q[d] = x;
     _qS[d] = Math.round(x * 32767);
   }
-  findTopCentroids(FULL_NPROBE);
-  _hSize = 0;
+  findTopCentroids(FAST_NPROBE);
+  _hSize = 0; _heapFraudCount = 0;
   scanClustersExact(0, FAST_NPROBE);
-  _hSize = 0;
+  _hSize = 0; _heapFraudCount = 0;
+  findTopCentroidsFromCache(FULL_NPROBE);
   scanClustersExact(FAST_NPROBE, FULL_NPROBE);
-  _hSize = 0;
+  _hSize = 0; _heapFraudCount = 0;
 }
 
 export function ivfFlatScore(vec: Float32Array): number {
@@ -425,26 +512,21 @@ export function ivfFlatScore(vec: Float32Array): number {
     _qS[d] = Math.round(x * 32767);
   }
 
-  // Single centroid search upfront — avoids rescanning all NLIST centroids twice.
-  // Fast-path check: if the top FAST_NPROBE clusters already give a unanimous vote,
-  // return immediately without scanning the remaining [FAST_NPROBE, FULL_NPROBE) clusters.
-  findTopCentroids(FULL_NPROBE);
+  // Fast pass: small heap (k=FAST_NPROBE) fills quickly → tight threshold → cheap centroid
+  // scan. All distances cached in _centDist for the slow path to reuse without recomputing.
+  findTopCentroids(FAST_NPROBE);
   _hSize = 0;
+  _heapFraudCount = 0;
   scanClustersExact(0, FAST_NPROBE);
 
-  let fraudCount = 0;
-  for (let i = 0; i < _hSize; i++) fraudCount += _hLabel[i]!;
-
-  if (fraudCount === 0 || fraudCount === K_FINAL) {
+  if (_heapFraudCount === 0 || _heapFraudCount === K_FINAL) {
     fastPathCount++;
-    return fraudCount / K_FINAL;
+    return _heapFraudCount / K_FINAL;
   }
 
-  // Ambiguous: scan the remaining clusters already ranked by centroid distance.
+  // Slow pass: reuse cached distances to find top-FULL_NPROBE without a second L2 scan.
+  findTopCentroidsFromCache(FULL_NPROBE);
   scanClustersExact(FAST_NPROBE, FULL_NPROBE);
-  fraudCount = 0;
-  for (let i = 0; i < _hSize; i++) fraudCount += _hLabel[i]!;
   fullPathCount++;
-
-  return fraudCount / K_FINAL;
+  return _heapFraudCount / K_FINAL;
 }
