@@ -46,8 +46,7 @@ const clusterSizes = new Uint32Array(buffer, byteOff, NLIST);
 byteOff += NLIST * 4;
 const clusterOffsets = new Uint32Array(buffer, byteOff, NLIST);
 byteOff += NLIST * 4;
-const clusterFraudCounts = new Uint32Array(buffer, byteOff, NLIST);
-byteOff += NLIST * 4;
+byteOff += NLIST * 4; // fraudCounts — reserved for future use
 const bboxMin = new Int16Array(buffer, byteOff, NLIST * DIMS);
 byteOff += NLIST * DIMS * 2;
 const bboxMax = new Int16Array(buffer, byteOff, NLIST * DIMS);
@@ -342,19 +341,12 @@ function bboxLb(c: number, worst: number): number {
 
 // Scan clusters [fromP, toP) with exact Int16 L2, accumulating into the K_FINAL heap.
 // The heap persists across calls so fast + full scans share the same top-K.
-// Returns true if the heap reached a unanimous verdict mid-scan (caller may stop early).
-//
-// Two additional pruning strategies on top of bbox:
-//   1. Pure-label skip: if a cluster contains only one label and the heap is already
-//      unanimously that same label, scanning it cannot change the vote — skip it.
-//   2. Per-cluster unanimity check: after each cluster, if the heap is full and all
-//      K_FINAL neighbors share the same label, the verdict is decided — return early.
-function scanClustersExact(fromP: number, toP: number): boolean {
+// Partial-sum early exit: bail after each block of 4 dims if already worse than heap top.
+function scanClustersExact(fromP: number, toP: number): void {
   const sv = sortedVecs;
   const sl = sortedLabels;
   const offsets = clusterOffsets;
   const sizes = clusterSizes;
-  const fraudCounts = clusterFraudCounts;
   const q0 = _qS[0]!;
   const q1 = _qS[1]!;
   const q2 = _qS[2]!;
@@ -374,18 +366,8 @@ function scanClustersExact(fromP: number, toP: number): boolean {
     const c = _probIdx[p]!;
     if (_hSize >= K_FINAL && bboxLb(c, _hDist[0]!) >= _hDist[0]!) continue;
 
-    // Pure-label skip: a cluster with only one label cannot change the vote when
-    // the heap is already unanimous with that same label.
-    const fraudC = fraudCounts[c]!;
-    const sizeC = sizes[c]!;
-    if (_hSize >= K_FINAL && (fraudC === 0 || fraudC === sizeC)) {
-      let fc = 0;
-      for (let i = 0; i < K_FINAL; i++) fc += _hLabel[i]!;
-      if ((fraudC === 0 && fc === 0) || (fraudC === sizeC && fc === K_FINAL)) continue;
-    }
-
     const cOff = offsets[c]!;
-    const end = cOff + sizeC;
+    const end = cOff + sizes[c]!;
 
     for (let row = cOff; row < end; row++) {
       const vBase = row * DIMS;
@@ -412,16 +394,7 @@ function scanClustersExact(fromP: number, toP: number): boolean {
       dist += e12 * e12 + e13 * e13;
       heapPush(dist, sl[row]!);
     }
-
-    // Per-cluster unanimity check: if all K_FINAL neighbors now share a label,
-    // the verdict is decided regardless of remaining clusters.
-    if (_hSize >= K_FINAL) {
-      let fc = 0;
-      for (let i = 0; i < K_FINAL; i++) fc += _hLabel[i]!;
-      if (fc === 0 || fc === K_FINAL) return true;
-    }
   }
-  return false;
 }
 
 let fastPathCount = 0;
