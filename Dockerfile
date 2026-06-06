@@ -6,8 +6,9 @@ COPY package.json ./
 COPY scripts ./scripts
 COPY resources/references.json.gz resources/
 
+ARG SEED=42
 RUN bun scripts/preprocess.ts
-RUN bun scripts/build-ivf-flat.ts
+RUN SEED=${SEED} bun scripts/build-ivf-flat.ts
 
 # ---
 

@@ -1,5 +1,5 @@
 x-api: &api
-  image: jotapemattos/rinha-de-backend-2026:v18
+  image: jotapemattos/rinha-de-backend-2026:v19
   restart: always
   volumes:
     - socks:/socks
@@ -14,8 +14,8 @@ services:
   api1:
     <<: *api
     environment:
-      FAST_NPROBE: 4
-      FULL_NPROBE: 64
+      FAST_NPROBE: 5
+      FULL_NPROBE: 32
       UDS_PATH: /socks/api1.sock
     healthcheck:
       test: ["CMD-SHELL", "test -S /socks/api1.sock"]
@@ -27,8 +27,8 @@ services:
   api2:
     <<: *api
     environment:
-      FAST_NPROBE: 4
-      FULL_NPROBE: 64
+      FAST_NPROBE: 5
+      FULL_NPROBE: 32
       UDS_PATH: /socks/api2.sock
     healthcheck:
       test: ["CMD-SHELL", "test -S /socks/api2.sock"]
